@@ -1,0 +1,55 @@
+[package]
+name = "opensnitch-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for OpenSnitch application firewall"
+license = "GPL-3.0"
+repository = "https://github.com/evilsocket/opensnitch"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "sync"] }
+tokio-stream = "0.1"
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+tower = "0.5"
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1.0"
+libc = "0.2"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+directories = "5.0"
+uuid = { version = "1", features = ["v4"] }
+async-stream = "0.3"
+dirs = "5"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[[bin]]
+name = "opensnitch-tui"
+path = "src/main.rs"
