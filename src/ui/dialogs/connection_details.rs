@@ -11,6 +11,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::app::state::AppMessage;
+use crate::grpc::notifications::NotificationAction;
 use crate::models::{Event, Operator, Rule, RuleAction, RuleDuration};
 use crate::ui::theme::Theme;
 
@@ -108,9 +109,15 @@ impl ConnectionDetailsDialog {
                     }
                     if let Some(addr) = node_addr {
                         if let Some(rule) = self.create_rule(action) {
+                            // Update local state
                             let _ = state_tx.try_send(AppMessage::RuleAdded {
                                 node_addr: addr.to_string(),
-                                rule,
+                                rule: rule.clone(),
+                            });
+                            // Send to daemon
+                            let _ = state_tx.try_send(AppMessage::SendNotification {
+                                node_addr: addr.to_string(),
+                                action: NotificationAction::ChangeRule(rule),
                             });
                         }
                     }

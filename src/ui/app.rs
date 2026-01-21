@@ -181,6 +181,7 @@ impl TuiApp {
                             let has_dialog = match TabId::all()[self.current_tab] {
                                 TabId::Connections => self.connections_tab.showing_dialog(),
                                 TabId::Rules => self.rules_tab.showing_dialog(),
+                                TabId::Firewall => self.firewall_tab.showing_dialog(),
                                 _ => false,
                             };
 
@@ -206,7 +207,7 @@ impl TuiApp {
                                 TabId::Firewall => self.firewall_tab.handle_key(key, &self.state, &self.state_tx).await,
                                 TabId::Statistics => self.statistics_tab.handle_key(key, &self.state).await,
                                 TabId::Alerts => self.alerts_tab.handle_key(key, &self.state).await,
-                                TabId::Nodes => self.nodes_tab.handle_key(key, &self.state).await,
+                                TabId::Nodes => self.nodes_tab.handle_key(key, &self.state, &self.state_tx).await,
                             }
                         }
                     }

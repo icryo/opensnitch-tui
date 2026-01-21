@@ -189,6 +189,16 @@ impl NodeManager {
         self.active_node.as_deref()
     }
 
+    /// Set the active node by address
+    pub fn set_active(&mut self, addr: &str) -> bool {
+        if self.nodes.contains_key(addr) {
+            self.active_node = Some(addr.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn connected_nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes.values().filter(|n| n.status == NodeStatus::Connected)
     }

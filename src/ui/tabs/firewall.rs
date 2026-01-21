@@ -16,8 +16,11 @@ use crate::app::events::navigation_delta;
 use crate::app::state::{AppMessage, AppState};
 use crate::grpc::notifications::NotificationAction;
 use crate::models::{FwChain, FwRule, SysFirewall};
+use crate::ui::dialogs::fw_rule::{FwRuleEditorDialog, FwRuleEditorResult};
 use crate::ui::layout::DialogLayout;
 use crate::ui::theme::Theme;
+
+const FIREWALL_CONFIG_PATH: &str = "/etc/opensnitchd/system-fw.json";
 
 /// Focus area within firewall tab
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +40,14 @@ pub struct FirewallTab {
     // Dialogs
     show_toggle_confirm: bool,
     toggle_to_enable: bool,
+
+    // Rule editor
+    show_editor: bool,
+    editor: Option<FwRuleEditorDialog>,
+
+    // Delete confirmation
+    show_delete_confirm: bool,
+    rule_to_delete: Option<String>,
 }
 
 impl FirewallTab {
@@ -55,7 +66,32 @@ impl FirewallTab {
             selected_chain_idx: 0,
             show_toggle_confirm: false,
             toggle_to_enable: false,
+            show_editor: false,
+            editor: None,
+            show_delete_confirm: false,
+            rule_to_delete: None,
         }
+    }
+
+    pub fn showing_dialog(&self) -> bool {
+        self.show_editor || self.show_toggle_confirm || self.show_delete_confirm
+    }
+
+    /// Get currently selected rule
+    fn selected_rule(&self) -> Option<&FwRule> {
+        let chain = self.selected_chain()?;
+        let idx = self.rule_state.selected()?;
+        chain.rules.get(idx)
+    }
+
+    /// Save firewall config to disk
+    fn save_firewall_config(&self) -> Result<(), std::io::Error> {
+        if let Some(fw) = &self.cached_firewall {
+            let json = serde_json::to_string_pretty(fw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            std::fs::write(FIREWALL_CONFIG_PATH, json)?;
+        }
+        Ok(())
     }
 
     pub async fn update_cache(&mut self, state: &Arc<AppState>) {
@@ -79,9 +115,23 @@ impl FirewallTab {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, _state: &Arc<AppState>, theme: &Theme) {
+        // Rule editor dialog
+        if self.show_editor {
+            if let Some(editor) = &self.editor {
+                editor.render(frame, theme);
+            }
+            return;
+        }
+
         // Toggle confirmation dialog
         if self.show_toggle_confirm {
             self.render_toggle_confirm(frame, area, theme);
+            return;
+        }
+
+        // Delete confirmation dialog
+        if self.show_delete_confirm {
+            self.render_delete_confirm(frame, area, theme);
             return;
         }
 
@@ -277,7 +327,7 @@ impl FirewallTab {
                 area.width - 2,
                 1,
             );
-            let hint = Paragraph::new(" e=edit  n=new  d=delete  space=toggle  +/-=reorder")
+            let hint = Paragraph::new(" n=new  e/Enter=edit  d=delete  space=toggle")
                 .style(theme.dim());
             frame.render_widget(hint, hint_area);
         }
@@ -319,7 +369,137 @@ impl FirewallTab {
         frame.render_widget(hint, chunks[1]);
     }
 
+    fn render_delete_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let dialog_area = DialogLayout::centered(area, 50, 8).dialog;
+        frame.render_widget(Clear, dialog_area);
+
+        let rule_desc = self.rule_to_delete.as_deref().unwrap_or("unknown");
+
+        let block = Block::default()
+            .title(" Confirm Delete ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+
+        frame.render_widget(block.clone(), dialog_area);
+
+        let inner = block.inner(dialog_area);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(1),
+            ])
+            .split(inner);
+
+        let msg = Paragraph::new(format!("Delete rule '{}'?", truncate(rule_desc, 30)))
+            .style(theme.normal());
+        frame.render_widget(msg, chunks[0]);
+
+        let hint = Paragraph::new("  y = yes, delete  |  n/Esc = cancel")
+            .style(theme.dim());
+        frame.render_widget(hint, chunks[1]);
+    }
+
     pub async fn handle_key(&mut self, key: KeyEvent, state: &Arc<AppState>, state_tx: &mpsc::Sender<AppMessage>) {
+        // Handle rule editor dialog
+        if self.show_editor {
+            if let Some(editor) = &mut self.editor {
+                if let Some(result) = editor.handle_key(key) {
+                    match result {
+                        FwRuleEditorResult::Save(rule) => {
+                            // Add/update rule in cached firewall
+                            if let Some(fw) = &mut self.cached_firewall {
+                                if let Some(chain) = self.cached_chains.get_mut(self.selected_chain_idx) {
+                                    if editor.original_uuid.is_some() {
+                                        // Edit existing
+                                        if let Some(existing) = chain.rules.iter_mut().find(|r| r.uuid == rule.uuid) {
+                                            *existing = rule;
+                                        }
+                                    } else {
+                                        // Add new
+                                        chain.rules.push(rule);
+                                    }
+                                    // Update the main firewall struct
+                                    for fc in &mut fw.system_rules {
+                                        if let Some(c) = fc.chains.iter_mut().find(|c| c.name == chain.name) {
+                                            c.rules = chain.rules.clone();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Save to disk and reload
+                            if let Err(e) = self.save_firewall_config() {
+                                tracing::error!("Failed to save firewall config: {}", e);
+                            } else {
+                                // Send reload notification
+                                let node_addr = {
+                                    let nodes = state.nodes.read().await;
+                                    nodes.active_addr().map(|s| s.to_string())
+                                };
+                                if let Some(addr) = node_addr {
+                                    let _ = state_tx.send(AppMessage::SendNotification {
+                                        node_addr: addr,
+                                        action: NotificationAction::ReloadFwRules,
+                                    }).await;
+                                }
+                            }
+                        }
+                        FwRuleEditorResult::Cancel => {}
+                    }
+                    self.show_editor = false;
+                    self.editor = None;
+                }
+            }
+            return;
+        }
+
+        // Handle delete confirmation
+        if self.show_delete_confirm {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(uuid) = self.rule_to_delete.take() {
+                        // Remove rule from cached firewall
+                        if let Some(fw) = &mut self.cached_firewall {
+                            if let Some(chain) = self.cached_chains.get_mut(self.selected_chain_idx) {
+                                chain.rules.retain(|r| r.uuid != uuid);
+                                // Update the main firewall struct
+                                for fc in &mut fw.system_rules {
+                                    if let Some(c) = fc.chains.iter_mut().find(|c| c.name == chain.name) {
+                                        c.rules = chain.rules.clone();
+                                    }
+                                }
+                            }
+                        }
+
+                        // Save to disk and reload
+                        if let Err(e) = self.save_firewall_config() {
+                            tracing::error!("Failed to save firewall config: {}", e);
+                        } else {
+                            let node_addr = {
+                                let nodes = state.nodes.read().await;
+                                nodes.active_addr().map(|s| s.to_string())
+                            };
+                            if let Some(addr) = node_addr {
+                                let _ = state_tx.send(AppMessage::SendNotification {
+                                    node_addr: addr,
+                                    action: NotificationAction::ReloadFwRules,
+                                }).await;
+                            }
+                        }
+                    }
+                    self.show_delete_confirm = false;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.show_delete_confirm = false;
+                    self.rule_to_delete = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Handle toggle confirmation
         if self.show_toggle_confirm {
             match key.code {
@@ -378,6 +558,78 @@ impl FirewallTab {
                         node_addr: addr,
                         action: NotificationAction::ReloadFwRules,
                     }).await;
+                }
+            }
+            KeyCode::Char('n') => {
+                // New rule (only in Rules focus)
+                if self.focus == FirewallFocus::Rules && !self.cached_chains.is_empty() {
+                    let mut editor = FwRuleEditorDialog::new();
+                    // Set position to end of list
+                    if let Some(chain) = self.selected_chain() {
+                        editor.position = chain.rules.len() as u64;
+                    }
+                    self.editor = Some(editor);
+                    self.show_editor = true;
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Enter => {
+                // Edit selected rule
+                if self.focus == FirewallFocus::Rules {
+                    if let Some(rule) = self.selected_rule() {
+                        self.editor = Some(FwRuleEditorDialog::edit(rule));
+                        self.show_editor = true;
+                    }
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                // Delete selected rule
+                if self.focus == FirewallFocus::Rules {
+                    if let Some(rule) = self.selected_rule() {
+                        self.rule_to_delete = Some(rule.uuid.clone());
+                        self.show_delete_confirm = true;
+                    }
+                }
+            }
+            KeyCode::Char(' ') => {
+                // Toggle rule enabled
+                if self.focus == FirewallFocus::Rules {
+                    if let Some(rule) = self.selected_rule() {
+                        let uuid = rule.uuid.clone();
+                        let new_enabled = !rule.enabled;
+
+                        // Update in cached data
+                        if let Some(chain) = self.cached_chains.get_mut(self.selected_chain_idx) {
+                            if let Some(r) = chain.rules.iter_mut().find(|r| r.uuid == uuid) {
+                                r.enabled = new_enabled;
+                            }
+                            // Update main firewall struct
+                            if let Some(fw) = &mut self.cached_firewall {
+                                for fc in &mut fw.system_rules {
+                                    if let Some(c) = fc.chains.iter_mut().find(|c| c.name == chain.name) {
+                                        if let Some(r) = c.rules.iter_mut().find(|r| r.uuid == uuid) {
+                                            r.enabled = new_enabled;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Save and reload
+                        if let Err(e) = self.save_firewall_config() {
+                            tracing::error!("Failed to save firewall config: {}", e);
+                        } else {
+                            let node_addr = {
+                                let nodes = state.nodes.read().await;
+                                nodes.active_addr().map(|s| s.to_string())
+                            };
+                            if let Some(addr) = node_addr {
+                                let _ = state_tx.send(AppMessage::SendNotification {
+                                    node_addr: addr,
+                                    action: NotificationAction::ReloadFwRules,
+                                }).await;
+                            }
+                        }
+                    }
                 }
             }
             _ => {

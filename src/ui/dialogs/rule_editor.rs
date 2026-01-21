@@ -4,7 +4,6 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
@@ -12,6 +11,33 @@ use ratatui::{
 use crate::models::{Operator, OperatorType, Rule, RuleAction, RuleDuration};
 use crate::ui::layout::DialogLayout;
 use crate::ui::theme::Theme;
+
+/// Available operand options for rules
+const OPERANDS: &[&str] = &[
+    "process.path",
+    "process.command",
+    "process.id",
+    "process.hash.md5",
+    "process.hash.sha1",
+    "process.parent.path",
+    "user.id",
+    "user.name",
+    "dest.host",
+    "dest.ip",
+    "dest.port",
+    "dest.network",
+    "source.ip",
+    "source.port",
+    "source.network",
+    "protocol",
+    "iface.in",
+    "iface.out",
+    "lists.domains",
+    "lists.domains_regexp",
+    "lists.ips",
+    "lists.nets",
+    "lists.hash.md5",
+];
 
 /// Editor mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +105,7 @@ pub struct RuleEditorDialog {
     pub action: RuleAction,
     pub duration: RuleDuration,
     pub operator_type: OperatorType,
-    pub operand: String,
+    pub operand_idx: usize,  // Index into OPERANDS
     pub data: String,
     pub enabled: bool,
     pub precedence: bool,
@@ -104,7 +130,7 @@ impl RuleEditorDialog {
             action: RuleAction::Allow,
             duration: RuleDuration::Always,
             operator_type: OperatorType::Simple,
-            operand: "process.path".to_string(),
+            operand_idx: 0, // process.path
             data: String::new(),
             enabled: true,
             precedence: false,
@@ -116,6 +142,11 @@ impl RuleEditorDialog {
 
     /// Create editor for editing an existing rule
     pub fn edit(rule: &Rule) -> Self {
+        // Find operand index
+        let operand_idx = OPERANDS.iter()
+            .position(|&o| o == rule.operator.operand)
+            .unwrap_or(0);
+
         Self {
             mode: EditorMode::Edit,
             focus: EditorFocus::Name,
@@ -125,7 +156,7 @@ impl RuleEditorDialog {
             action: rule.action,
             duration: rule.duration.clone(),
             operator_type: rule.operator.op_type.clone(),
-            operand: rule.operator.operand.clone(),
+            operand_idx,
             data: rule.operator.data.clone(),
             enabled: rule.enabled,
             precedence: rule.precedence,
@@ -135,11 +166,16 @@ impl RuleEditorDialog {
         }
     }
 
+    /// Get current operand string
+    fn operand(&self) -> &str {
+        OPERANDS.get(self.operand_idx).copied().unwrap_or("process.path")
+    }
+
     /// Build rule from current state
     pub fn build_rule(&self) -> Rule {
         let operator = Operator {
             op_type: self.operator_type.clone(),
-            operand: self.operand.clone(),
+            operand: self.operand().to_string(),
             data: self.data.clone(),
             sensitive: false,
             list: Vec::new(),
@@ -174,25 +210,31 @@ impl RuleEditorDialog {
             }
             KeyCode::Enter => {
                 match self.focus {
-                    EditorFocus::Name | EditorFocus::Description |
-                    EditorFocus::Operand | EditorFocus::Data => {
+                    EditorFocus::Name | EditorFocus::Description | EditorFocus::Data => {
                         self.editing_text = true;
                         self.cursor_pos = self.current_text().len();
                     }
                     EditorFocus::Enabled => self.enabled = !self.enabled,
                     EditorFocus::Precedence => self.precedence = !self.precedence,
                     EditorFocus::NoLog => self.nolog = !self.nolog,
-                    _ => {}
+                    EditorFocus::Operand => self.cycle_operand(true),
+                    _ => self.cycle_option(true),
                 }
             }
             KeyCode::Left | KeyCode::Right => {
-                self.cycle_option(key.code == KeyCode::Right);
+                let forward = key.code == KeyCode::Right;
+                if self.focus == EditorFocus::Operand {
+                    self.cycle_operand(forward);
+                } else {
+                    self.cycle_option(forward);
+                }
             }
             KeyCode::Char(' ') => {
                 match self.focus {
                     EditorFocus::Enabled => self.enabled = !self.enabled,
                     EditorFocus::Precedence => self.precedence = !self.precedence,
                     EditorFocus::NoLog => self.nolog = !self.nolog,
+                    EditorFocus::Operand => self.cycle_operand(true),
                     _ => self.cycle_option(true),
                 }
             }
@@ -264,7 +306,6 @@ impl RuleEditorDialog {
         match self.focus {
             EditorFocus::Name => &self.name,
             EditorFocus::Description => &self.description,
-            EditorFocus::Operand => &self.operand,
             EditorFocus::Data => &self.data,
             _ => "",
         }
@@ -274,9 +315,17 @@ impl RuleEditorDialog {
         match self.focus {
             EditorFocus::Name => &mut self.name,
             EditorFocus::Description => &mut self.description,
-            EditorFocus::Operand => &mut self.operand,
             EditorFocus::Data => &mut self.data,
             _ => &mut self.name, // Fallback
+        }
+    }
+
+    fn cycle_operand(&mut self, forward: bool) {
+        let len = OPERANDS.len();
+        if forward {
+            self.operand_idx = (self.operand_idx + 1) % len;
+        } else {
+            self.operand_idx = if self.operand_idx == 0 { len - 1 } else { self.operand_idx - 1 };
         }
     }
 
@@ -425,8 +474,8 @@ impl RuleEditorDialog {
 
         render_field(frame, chunks[5], "Operator", &format!("◄ {} ►", self.operator_type),
             self.focus == EditorFocus::OperatorType, false);
-        render_field(frame, chunks[6], "Operand", &self.operand,
-            self.focus == EditorFocus::Operand, self.editing_text && self.focus == EditorFocus::Operand);
+        render_field(frame, chunks[6], "Operand", &format!("◄ {} ►", self.operand()),
+            self.focus == EditorFocus::Operand, false);
         render_field(frame, chunks[7], "Data", &self.data,
             self.focus == EditorFocus::Data, self.editing_text && self.focus == EditorFocus::Data);
 
